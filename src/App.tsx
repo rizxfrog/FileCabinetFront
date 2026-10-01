@@ -604,11 +604,9 @@ export default function App() {
           <div className="storage-note">
             存储托管于阿里云
             <br />
-            <span>
-              {config?.upload_mode === "direct"
-                ? "实验性浏览器直传模式"
-                : "浏览器安全中转模式"}
-            </span>
+            <span>上传：{config?.upload_mode === "direct" ? "浏览器直传" : "后端中转"}</span>
+            <br />
+            <span>下载：{config?.download_mode === "direct" ? "直链跳转" : "后端中转"}</span>
           </div>
         </aside>
         <section className="workspace" aria-label="文件操作">

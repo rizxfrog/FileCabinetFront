@@ -105,10 +105,11 @@ async function directPage(page: Page, inlineLimit = 5) {
     await route.fulfill({ response, headers: { ...response.headers(), "Content-Security-Policy": directCSP } });
   });
   await page.route("**/api/config", route => route.fulfill({ json: {
-    upload_mode: "direct", max_upload_bytes: 10000000, inline_limit: inlineLimit,
+    upload_mode: "direct", download_mode: "direct", max_upload_bytes: 10000000, inline_limit: inlineLimit,
   } }));
   await page.goto("/");
   await expect(page.getByText("当前为 direct 模式", { exact: false })).toBeVisible();
+  await expect(page.getByText("下载：直链跳转")).toBeVisible();
   await page.locator("#file-picker").setInputFiles({ name: file.name, mimeType: "text/plain", buffer: sample });
   await page.getByLabel("同时生成分享短码").uncheck();
 }

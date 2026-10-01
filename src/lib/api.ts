@@ -12,6 +12,7 @@ export interface ShortCode {
 }
 export interface Config {
   upload_mode: "proxy" | "direct";
+  download_mode: "proxy" | "direct";
   max_upload_bytes: number;
   inline_limit: number;
   unsafe_direct_expose_url: boolean;
