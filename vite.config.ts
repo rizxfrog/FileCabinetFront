@@ -7,8 +7,12 @@ export default defineConfig({
   worker: { format: "es" },
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:6499",
-      "/healthz": "http://127.0.0.1:6499",
+      // changeOrigin: false keeps the browser's Host, so the backend's same-origin
+      // CSRF check sees Origin and Host agreeing. Vite defaults it to true for
+      // string targets, which rewrites Host to the backend and makes every write
+      // look cross-site (403, and a proxy reset for large bodies).
+      "/api": { target: "http://127.0.0.1:6499", changeOrigin: false },
+      "/healthz": { target: "http://127.0.0.1:6499", changeOrigin: false },
     },
   },
 });
