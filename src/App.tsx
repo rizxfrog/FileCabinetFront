@@ -19,6 +19,7 @@ import {
   api,
   hashFile,
   upload,
+  uploadDirect,
   type Config,
   type ShortCode,
   type StoredFile,
@@ -136,10 +137,6 @@ function UploadPanel({ config }: { config: Config | null }) {
         throw new Error(
           `文件超过大小限制 ${sizeLabel(config.max_upload_bytes)}`,
         );
-      if (config.upload_mode === "direct" && file.size > config.inline_limit)
-        throw new Error(
-          "当前为原生客户端直传模式，浏览器无法上传大文件。请将服务端 UPLOAD_MODE 切换为 proxy。",
-        );
       expiry = expiryValue(preset, custom);
       if (withCode && codePreset === "custom") {
         codeExpiry = expiryValue("custom", codeCustom);
@@ -160,7 +157,10 @@ function UploadPanel({ config }: { config: Config | null }) {
       setHash(h);
       setStage("正在上传文件");
       setProgress(0);
-      const f = await upload(
+      const send = config.upload_mode === "direct" && file.size > config.inline_limit
+        ? uploadDirect
+        : upload;
+      const f = await send(
         file,
         h,
         expiry,
@@ -319,8 +319,7 @@ function UploadPanel({ config }: { config: Config | null }) {
       </fieldset>
       {config?.upload_mode === "direct" && (
         <p className="notice">
-          当前为 direct 模式：浏览器仅支持 ≤ {sizeLabel(config.inline_limit)}{" "}
-          的小文件。原生直传还需上游提供免 token 签名地址；当前 ModelScope LFS 需服务端认证，请使用 proxy。
+          当前为 direct 模式（实验）：大文件将尝试浏览器直传，需要上游允许 CORS。{config.unsafe_direct_expose_url ? "危险实验开关已开启：服务端会把上游上传地址返回浏览器，但不会返回 token；测试完成后请立即关闭 UNSAFE_DIRECT_EXPOSE_URL。" : "当前 ModelScope LFS 需要服务端认证，申请新大文件地址可能返回 422。"} ≤ {sizeLabel(config.inline_limit)} 的文件仍经后端上传。
         </p>
       )}
       <div className="submit-row">
@@ -603,11 +602,11 @@ export default function App() {
             <span>有效期由你决定</span>
           </div>
           <div className="storage-note">
-            存储于 ModelScope
+            存储托管于阿里云
             <br />
             <span>
               {config?.upload_mode === "direct"
-                ? "原生客户端直传模式"
+                ? "实验性浏览器直传模式"
                 : "浏览器安全中转模式"}
             </span>
           </div>

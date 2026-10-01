@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 const sample = Buffer.from("文件柜 browser smoke");
 const hash = createHash("sha256").update(sample).digest("hex");
@@ -96,29 +96,154 @@ test("worker hash, upload, code and download lookup under production CSP", async
     ),
   ).toBe(true);
 });
-test("direct-mode browser large upload is rejected clearly", async ({
-  page,
-}) => {
-  await page.route("**/api/config", (route) =>
-    route.fulfill({
-      json: {
-        upload_mode: "direct",
-        max_upload_bytes: 10000000,
-        inline_limit: 5,
-      },
-    }),
-  );
-  await page.goto("/");
-  await expect(
-    page.getByText("当前为 direct 模式", { exact: false }),
-  ).toBeVisible();
-  await page.locator("#file-picker").setInputFiles({
-    name: "large.txt",
-    mimeType: "text/plain",
-    buffer: sample,
+const session = "a".repeat(48);
+const storageURL = "https://upload.example.com/blob?signature=test";
+const directCSP = csp.replace("connect-src 'self'", "connect-src 'self' https://example.com https://*.example.com");
+async function directPage(page: Page, inlineLimit = 5) {
+  await page.route("**/", async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(), "Content-Security-Policy": directCSP } });
   });
+  await page.route("**/api/config", route => route.fulfill({ json: {
+    upload_mode: "direct", max_upload_bytes: 10000000, inline_limit: inlineLimit,
+  } }));
+  await page.goto("/");
+  await expect(page.getByText("当前为 direct 模式", { exact: false })).toBeVisible();
+  await page.locator("#file-picker").setInputFiles({ name: file.name, mimeType: "text/plain", buffer: sample });
+  await page.getByLabel("同时生成分享短码").uncheck();
+}
+for (const reused of [false, true]) {
+  test(`browser direct ${reused ? "reused blob" : "signed PUT"} completes under CSP`, async ({ page, context }) => {
+    const steps: string[] = [];
+    await context.addCookies([{ name: "must-not-send", value: "secret", domain: "upload.example.com", path: "/", secure: true, sameSite: "None" }]);
+    await page.route("**/api/uploads/prepare", route => {
+      steps.push("prepare");
+      expect(route.request().postDataJSON()).toEqual({ hash, name: file.name, size: sample.length, expires_at: 0 });
+      return route.fulfill({ status: 201, json: { session_id: session, upload_url: reused ? "" : storageURL, method: "PUT", expires_in: 3600 } });
+    });
+    await page.route(storageURL, async route => {
+      steps.push("put");
+      expect(route.request().method()).toBe("PUT");
+      expect(route.request().postDataBuffer()).toEqual(sample);
+      const headers = await route.request().allHeaders();
+      expect(headers.authorization).toBeUndefined();
+      expect(headers.cookie).toBeUndefined();
+      await route.fulfill({ status: 200, body: "", headers: { "Access-Control-Allow-Origin": "*" } });
+    });
+    await page.route("**/api/uploads/*/complete", route => {
+      steps.push("complete");
+      expect(route.request().url()).toContain(session);
+      return route.fulfill({ json: file });
+    });
+    await directPage(page);
+    await page.getByRole("button", { name: "上传并归档" }).click();
+    await expect(page.getByText("文件已归档")).toBeVisible();
+    expect(steps).toEqual(reused ? ["prepare", "complete"] : ["prepare", "put", "complete"]);
+  });
+}
+for (const failure of ["prepare", "put"]) {
+  test(`browser direct ${failure} failure never completes`, async ({ page }) => {
+    let completed = false;
+    let put = false;
+    await page.route("**/api/uploads/prepare", route => route.fulfill(failure === "prepare"
+      ? { status: 422, json: { error: "LFS 需要服务端认证，请使用 proxy" } }
+      : { json: { session_id: session, upload_url: storageURL, method: "PUT", expires_in: 3600 } }));
+    await page.route(storageURL, route => {
+      put = true;
+      return route.fulfill({ status: 403, body: "private upstream detail", headers: { "Access-Control-Allow-Origin": "*" } });
+    });
+    await page.route("**/api/uploads/*/complete", route => { completed = true; return route.fulfill({ json: file }); });
+    await directPage(page);
+    await page.getByRole("button", { name: "上传并归档" }).click();
+    await expect(page.getByRole("alert")).toContainText(failure === "prepare" ? "LFS 需要服务端认证" : "直传失败 (403)");
+    await expect(page.getByRole("button", { name: "上传并归档" })).toBeEnabled();
+    expect(completed).toBe(false);
+    expect(put).toBe(failure === "put");
+    await expect(page.getByText("文件已归档")).toHaveCount(0);
+  });
+}
+for (const phase of ["prepare", "put", "complete"]) {
+  test(`cancel during direct ${phase} stops waiting and further requests`, async ({ page }) => {
+    const steps: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const requested = new Promise<void>(resolve => { entered = resolve; });
+    let finished!: () => void;
+    const done = new Promise<void>(resolve => { finished = resolve; });
+    async function waitAt(name: string) {
+      steps.push(name);
+      if (phase === name) { entered(); await gate; }
+    }
+    await page.route("**/api/uploads/prepare", async route => {
+      await waitAt("prepare");
+      try { await route.fulfill({ json: { session_id: session, upload_url: storageURL, method: "PUT", expires_in: 3600 } }); }
+      finally { if (phase === "prepare") finished(); }
+    });
+    await page.route(storageURL, async route => {
+      await waitAt("put");
+      try { await route.fulfill({ status: 200, body: "", headers: { "Access-Control-Allow-Origin": "*" } }); }
+      finally { if (phase === "put") finished(); }
+    });
+    await page.route("**/api/uploads/*/complete", async route => {
+      await waitAt("complete");
+      try { await route.fulfill({ json: file }); }
+      finally { if (phase === "complete") finished(); }
+    });
+    await directPage(page);
+    await page.getByRole("button", { name: "上传并归档" }).click();
+    await requested;
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    try {
+      await expect(page.getByRole("button", { name: "上传并归档" })).toBeEnabled();
+      await expect(page.getByRole("alert")).toBeVisible();
+      await expect(page.getByText("文件已归档")).toHaveCount(0);
+    } finally { release(); }
+    await done;
+    expect(steps).toEqual(["prepare", "put", "complete"].slice(0, ["prepare", "put", "complete"].indexOf(phase) + 1));
+  });
+}
+test("direct CSP blocks an untrusted storage origin", async ({ page }) => {
+  let contacted = false;
+  let completed = false;
+  const untrusted = "https://untrusted.invalid/blob?signature=test";
+  await page.route("**/api/uploads/prepare", route => route.fulfill({ json: { session_id: session, upload_url: untrusted, method: "PUT", expires_in: 3600 } }));
+  await page.route(untrusted, route => { contacted = true; return route.fulfill({ body: "", headers: { "Access-Control-Allow-Origin": "*" } }); });
+  await page.route("**/api/uploads/*/complete", route => { completed = true; return route.fulfill({ json: file }); });
+  await directPage(page);
   await page.getByRole("button", { name: "上传并归档" }).click();
-  await expect(page.getByRole("alert")).toContainText("浏览器无法上传大文件");
+  await expect(page.getByRole("alert")).toContainText("直传连接失败");
+  expect(contacted).toBe(false);
+  expect(completed).toBe(false);
+});
+
+test("direct redirected PUT never completes", async ({ page }) => {
+  let completed = false;
+  const redirected = "https://upload.example.com/redirected";
+  await page.route("**/api/uploads/prepare", route => route.fulfill({ json: { session_id: session, upload_url: storageURL, method: "PUT", expires_in: 3600 } }));
+  await page.route(storageURL, route => route.fulfill({ status: 307, headers: { Location: redirected, "Access-Control-Allow-Origin": "*" } }));
+  await page.route(redirected, async route => {
+    const headers = await route.request().allHeaders();
+    expect(headers.authorization).toBeUndefined();
+    expect(headers.cookie).toBeUndefined();
+    await route.fulfill({ status: 200, body: "", headers: { "Access-Control-Allow-Origin": "*" } });
+  });
+  await page.route("**/api/uploads/*/complete", route => { completed = true; return route.fulfill({ json: file }); });
+  await directPage(page);
+  await page.getByRole("button", { name: "上传并归档" }).click();
+  // Chrome may reject a cross-origin preflighted redirect before exposing its
+  // final URL to XHR. Either failure must stop before backend completion.
+  await expect(page.getByRole("alert")).toContainText(/直传发生重定向|直传连接失败/);
+  expect(completed).toBe(false);
+});
+
+test("direct small file still uses inline endpoint", async ({ page }) => {
+  let uploaded = false;
+  await page.route("**/api/files/**", route => { uploaded = true; return route.fulfill({ json: file }); });
+  await directPage(page, 5242880);
+  await page.getByRole("button", { name: "上传并归档" }).click();
+  await expect(page.getByText("文件已归档")).toBeVisible();
+  expect(uploaded).toBe(true);
 });
 test("API failure and optional code failure are distinguishable", async ({
   page,
