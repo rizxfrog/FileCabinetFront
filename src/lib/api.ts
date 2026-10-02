@@ -10,6 +10,16 @@ export interface ShortCode {
   hash: string;
   expires_at: number;
 }
+export interface ListEntry {
+  hash: string;
+  name: string;
+  size: number;
+}
+// A lookup answers with either a single file (plus its download link) or a file list
+// whose entries carry their own names and sizes.
+export type Lookup =
+  | { file: StoredFile; download_url: string; list?: undefined }
+  | { file: StoredFile; list: ListEntry[]; download_url?: undefined };
 export interface Config {
   upload_mode: "proxy" | "direct";
   download_mode: "proxy" | "direct";
@@ -190,6 +200,41 @@ function putDirect(
     }
     xhr.send(file);
   });
+}
+
+export function createList(
+  name: string,
+  hashes: string[],
+  signal?: AbortSignal,
+): Promise<StoredFile> {
+  return api<StoredFile>("/api/lists", { name, "file-list": hashes }, signal);
+}
+
+// Browsers throttle concurrent programmatic downloads, so entries are fetched one at a
+// time. The pause also keeps every request inside the same user gesture.
+export async function downloadList(
+  entries: ListEntry[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  for (let i = 0; i < entries.length; i++) {
+    saveBlob(`/api/download/${entries[i].hash}`, entries[i].name);
+    onProgress?.(i + 1, entries.length);
+    if (i + 1 < entries.length) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 700);
+      await promise;
+    }
+  }
+}
+
+function saveBlob(url: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export function hashFile(

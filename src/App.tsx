@@ -8,7 +8,9 @@ import {
   FileUp,
   FolderClosed,
   Hash,
+  Layers,
   Link2,
+  ListPlus,
   LoaderCircle,
   Search,
   ShieldCheck,
@@ -17,15 +19,19 @@ import {
 import { Button } from "./components/ui/button";
 import {
   api,
+  createList,
+  downloadList,
   hashFile,
   upload,
   uploadDirect,
   type Config,
+  type ListEntry,
+  type Lookup,
   type ShortCode,
   type StoredFile,
 } from "./lib/api";
 import { expiryLabel, expiryValue, sizeLabel } from "./lib/utils";
-type Tab = "upload" | "download" | "code";
+type Tab = "upload" | "download" | "code" | "list";
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "操作失败，请稍后重试";
 function CopyButton({
@@ -370,23 +376,34 @@ function UploadPanel({ config }: { config: Config | null }) {
 }
 function DownloadPanel() {
   const [key, setKey] = useState(""),
-    [result, setResult] = useState<{
-      file: StoredFile;
-      download_url: string;
-    } | null>(null),
+    [result, setResult] = useState<Lookup | null>(null),
     [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [progress, setProgress] = useState("");
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError("");
     setResult(null);
+    setProgress("");
     setBusy(true);
     try {
-      setResult(await api(`/api/files/${encodeURIComponent(key.trim())}`));
+      setResult(await api<Lookup>(`/api/files/${encodeURIComponent(key.trim())}`));
     } catch (e) {
       setError(message(e));
     } finally {
       setBusy(false);
+    }
+  }
+  async function grabAll(entries: ListEntry[]) {
+    setError("");
+    try {
+      // Entries download one at a time; the browser throttles bursts of saves.
+      await downloadList(entries, (done, total) =>
+        setProgress(`已发起 ${done}/${total}`),
+      );
+      setProgress(`已发起全部 ${entries.length} 个下载`);
+    } catch (e) {
+      setError(message(e));
     }
   }
   return (
@@ -423,27 +440,180 @@ function DownloadPanel() {
         </p>
       )}
       {result ? (
-        <div className="download-result" role="status">
-          <FileResult file={result.file} />
-          <div className="result-actions">
-            <Button asChild>
-              <a href={result.download_url}>
-                <ArrowDownToLine />
-                下载文件
-              </a>
-            </Button>
-            <CopyButton
-              value={new URL(result.download_url, window.location.origin).href}
-              label="复制下载链接"
-            />
+        result.list ? (
+          <div className="download-result" role="status">
+            <div className="file-result">
+              <div className="result-heading">
+                <Layers size={18} />
+                <strong>文件列表</strong>
+                <span>
+                  {result.list.length} 项 · {sizeLabel(result.file.size)}
+                </span>
+              </div>
+              <p className="file-name">{result.file.name}</p>
+              <label>列表指纹</label>
+              <code>{result.file.hash}</code>
+              <div className="result-actions">
+                <CopyButton value={result.file.hash} label="复制 hash" />
+                <Button
+                  type="button"
+                  onClick={() => grabAll(result.list)}
+                >
+                  <ArrowDownToLine />
+                  下载列表
+                </Button>
+              </div>
+              {progress && <small>{progress}</small>}
+              <ul className="list-entries">
+                {result.list.map((entry, i) => (
+                  <li key={entry.hash}>
+                    <span className="entry-index">{i + 1}</span>
+                    <span className="entry-name" title={entry.name}>
+                      {entry.name}
+                    </span>
+                    <span className="entry-size">{sizeLabel(entry.size)}</span>
+                    <Button asChild variant="ghost" size="sm">
+                      <a href={`/api/download/${entry.hash}`} download={entry.name}>
+                        <ArrowDownToLine />
+                        下载
+                      </a>
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+              <p className="field-note">
+                逐项下载受浏览器限制，请允许本页面的「多个文件下载」提示。
+              </p>
+            </div>
           </div>
-          <p className="field-note">链接通过本服务下载；文件过期后即失效。</p>
-        </div>
+        ) : (
+          <div className="download-result" role="status">
+            <FileResult file={result.file} />
+            <div className="result-actions">
+              <Button asChild>
+                <a href={result.download_url}>
+                  <ArrowDownToLine />
+                  下载文件
+                </a>
+              </Button>
+              <CopyButton
+                value={new URL(result.download_url, window.location.origin).href}
+                label="复制下载链接"
+              />
+            </div>
+            <p className="field-note">链接通过本服务下载；文件过期后即失效。</p>
+          </div>
+        )
       ) : (
         <div className="empty-drawer">
           <Archive size={40} />
           <p>文件不会列在这里</p>
           <span>持有 hash 或短码，才能打开对应的抽屉。</span>
+        </div>
+      )}
+    </form>
+  );
+}
+function ListPanel() {
+  const [name, setName] = useState(""),
+    [raw, setRaw] = useState(""),
+    [result, setResult] = useState<StoredFile | null>(null),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  const hashes = Array.from(
+    new Set(
+      raw
+        .split(/[\s,]+/)
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  const invalid = hashes.filter((h) => !/^[a-f0-9]{64}$/.test(h));
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    setResult(null);
+    if (invalid.length) {
+      setError(`有 ${invalid.length} 项不是合法的 64 位 SHA-256`);
+      return;
+    }
+    setBusy(true);
+    try {
+      setResult(await createList(name, hashes));
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form onSubmit={submit}>
+      <div className="panel-heading">
+        <div>
+          <h2>把文件编成一组</h2>
+          <p>按顺序引用已有文件，得到一个可分发的列表指纹。</p>
+        </div>
+        <ListPlus aria-hidden="true" />
+      </div>
+      <label htmlFor="list-name">列表名称</label>
+      <input
+        id="list-name"
+        disabled={busy}
+        required
+        maxLength={255}
+        autoComplete="off"
+        value={name}
+        onChange={(e) => {
+          setName(e.target.value);
+          setResult(null);
+        }}
+        placeholder="例如：各版本高等数学备份"
+      />
+      <label htmlFor="list-hashes">文件 hash（每行一个）</label>
+      <textarea
+        id="list-hashes"
+        disabled={busy}
+        required
+        rows={8}
+        spellCheck={false}
+        value={raw}
+        onChange={(e) => {
+          setRaw(e.target.value);
+          setResult(null);
+        }}
+        placeholder={"每行一个 64 位 SHA-256\n也支持用空格或逗号分隔"}
+      />
+      <p className="field-note">
+        {hashes.length} 项{invalid.length ? `，其中 ${invalid.length} 项格式不正确` : ""}
+        。列表只能引用已存在的文件，不能嵌套列表，最多 1000 项。
+      </p>
+      <Button type="submit" disabled={busy || !hashes.length}>
+        {busy ? <LoaderCircle className="spin" /> : <ListPlus />}
+        创建文件列表
+      </Button>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {result && (
+        <div className="download-result" role="status">
+          <div className="file-result">
+            <div className="result-heading">
+              <Check size={18} />
+              <strong>列表已创建</strong>
+              <span>
+                {hashes.length} 项 · {sizeLabel(result.size)}
+              </span>
+            </div>
+            <p className="file-name">{result.name}</p>
+            <label>列表指纹（可分享）</label>
+            <code>{result.hash}</code>
+            <div className="result-actions">
+              <CopyButton value={result.hash} label="复制 hash" />
+            </div>
+            <small>在「提取文件」中输入该指纹即可查看并下载全部文件。</small>
+          </div>
         </div>
       )}
     </form>
@@ -615,6 +785,7 @@ export default function App() {
               [
                 { key: "upload", label: "上传文件", icon: FileUp },
                 { key: "download", label: "提取文件", icon: ArrowDownToLine },
+                { key: "list", label: "创建列表", icon: ListPlus },
                 { key: "code", label: "生成短码", icon: Link2 },
               ] as const
             ).map((item) => (
@@ -641,6 +812,9 @@ export default function App() {
             )}
             <div hidden={tab !== "upload"}>
               <UploadPanel config={config} />
+            </div>
+            <div hidden={tab !== "list"}>
+              <ListPanel />
             </div>
             <div hidden={tab !== "download"}>
               <DownloadPanel />
