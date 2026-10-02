@@ -4,7 +4,7 @@ React + TypeScript + Vite + shadcn 风格 Button（Radix Slot/CVA）+ TailwindCS
 
 ```sh
 bun install --frozen-lockfile
-bun run dev       # http://127.0.0.1:5173，API 代理到 localhost:8080
+bun run dev       # http://127.0.0.1:5173，API 代理到 localhost:6499
 bun run build     # dist/
 bun test
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/google-chrome bun run test:e2e
